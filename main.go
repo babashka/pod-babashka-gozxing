@@ -10,14 +10,19 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"log"
+	"math/big"
 	"os"
 	"strings"
 
-	"github.com/babashka/pod-babashka-gozxing/babashka"
 	"github.com/babashka/transit-go"
+	"github.com/eggsylah/pod-eggsylah-gozxing/babashka"
 	"github.com/makiuchi-d/gozxing"
+	"github.com/makiuchi-d/gozxing/datamatrix"
+	"github.com/makiuchi-d/gozxing/oned"
 	"github.com/makiuchi-d/gozxing/qrcode"
 )
+
+const podName = "pod.eggsylah.gozxing"
 
 func listToSlice(l *list.List) []interface{} {
 	slice := make([]interface{}, l.Len())
@@ -71,7 +76,7 @@ func readImage(arg interface{}) (image.Image, error) {
 	}
 }
 
-func qrDecode(arg interface{}) (string, error) {
+func decode(barcodeFormat string, arg interface{}) (string, error) {
 	img, err := readImage(arg)
 	if err != nil {
 		return "", err
@@ -80,34 +85,131 @@ func qrDecode(arg interface{}) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	result, err := qrcode.NewQRCodeReader().Decode(bmp, nil)
+	var result *gozxing.Result
+
+	switch barcodeFormat {
+	case ":Code128":
+		result, err = oned.NewCode128Reader().Decode(bmp, nil)
+	case ":Code39":
+		result, err = oned.NewCode39Reader().Decode(bmp, nil)
+	case ":EAN-13":
+		result, err = oned.NewEAN13Reader().Decode(bmp, nil)
+	case ":ITF":
+		result, err = oned.NewITFReader().Decode(bmp, nil)
+	case ":QR":
+		result, err = qrcode.NewQRCodeReader().Decode(bmp, nil)
+	case ":DataMatrix":
+		result, err = datamatrix.NewDataMatrixReader().Decode(bmp, nil)
+	case ":UPC-A":
+		result, err = oned.NewUPCAReader().Decode(bmp, nil)
+	default:
+		err = errors.New(fmt.Sprintf("Unsupported barcode format for decode: %s", barcodeFormat))
+	}
 	if err != nil {
 		return "", err
 	}
 	return result.GetText(), nil
 }
 
-func optSize(opts interface{}) int {
-	size := 256
-	if m, ok := opts.(map[interface{}]interface{}); ok {
+// convert options into a map using strings as keys
+func getOptionsMap(options interface{}) map[string]interface{} {
+	ret := make(map[string]interface{})
+
+	if m, ok := options.(map[interface{}]interface{}); ok {
 		for k, v := range m {
-			if fmt.Sprintf("%v", k) == "size" {
-				switch n := v.(type) {
-				case int64:
-					size = int(n)
-				case int:
-					size = n
-				case float64:
-					size = int(n)
-				}
-			}
+			n := fmt.Sprintf("%v", k)
+			ret[n] = v
 		}
 	}
-	return size
+	return ret
 }
 
-func qrEncode(text string, path string, size int) error {
-	bmp, err := qrcode.NewQRCodeWriter().Encode(text, gozxing.BarcodeFormat_QR_CODE, size, size, nil)
+func getOptionValueAsInt(val interface{}) (ret int, err error) {
+	if val != nil {
+		switch n := val.(type) {
+		case int64:
+			ret = int(n)
+		case int:
+			ret = int(n)
+		case float64:
+			ret = int(n)
+		case *big.Int:
+			x, _ := n.Float64()
+			ret = int(x)
+		case big.Rat:
+			x, _ := n.Float64()
+			ret = int(x)
+		default:
+			err = errors.New(fmt.Sprintf("value should be a number not %v, a %T", val, val))
+		}
+	}
+	return ret, err
+}
+
+func getSize(opts map[string]interface{}) (sizeX int, sizeY int, err error) {
+	v := opts[":size"]
+	if v != nil {
+		switch n := v.(type) {
+		case []interface{}:
+			nn := v.([]interface{})
+			if len(nn) != 2 {
+				err = errors.New(fmt.Sprintf("size must be a number or a 2-vector of numbers not %v", nn))
+			}
+			if err == nil {
+				sizeX, err = getOptionValueAsInt(nn[0])
+			}
+			if err == nil {
+				sizeY, err = getOptionValueAsInt(nn[1])
+			}
+
+		default:
+			var size int
+			size, err = getOptionValueAsInt(n)
+			sizeX = size
+			sizeY = size
+		}
+	}
+	return sizeX, sizeY, err
+}
+
+func getECLevel(opts map[string]interface{}) (ecLevel string, err error) {
+	ecLevel, err = "", nil
+
+	v := opts[":ec-level"]
+	if v != nil {
+		val := fmt.Sprintf("%v", v)
+		ecLevel = val
+		if ecLevel[0] == ':' { // hack so keyword maps to string
+			ecLevel = ecLevel[1:]
+		}
+		if len(ecLevel) > 1 || strings.Index("LMQH", ecLevel) < 0 {
+			err = errors.New(fmt.Sprintf("ec-level must be one of L/M/Q/H not %s", val))
+		}
+	}
+	return ecLevel, err
+}
+
+func encode(barcodeFormat string, text string, path string, sizeX int, sizeY int, ecLevel string) (err error) {
+	var bmp image.Image
+	switch barcodeFormat {
+	case ":Code128":
+		bmp, err = oned.NewCode128Writer().Encode(text, gozxing.BarcodeFormat_CODE_128, sizeX, sizeY, nil)
+	case ":Code39":
+		bmp, err = oned.NewCode39Writer().Encode(text, gozxing.BarcodeFormat_CODE_39, sizeX, sizeY, nil)
+	case ":EAN-13":
+		bmp, err = oned.NewEAN13Writer().Encode(text, gozxing.BarcodeFormat_EAN_13, sizeX, sizeY, nil)
+	case ":ITF":
+		bmp, err = oned.NewITFWriter().Encode(text, gozxing.BarcodeFormat_ITF, sizeX, sizeY, nil)
+	case ":UPC-A":
+		bmp, err = oned.NewUPCAWriter().Encode(text, gozxing.BarcodeFormat_UPC_A, sizeX, sizeY, nil)
+	case ":QR":
+		hints := map[gozxing.EncodeHintType]interface{}{gozxing.EncodeHintType_ERROR_CORRECTION: ecLevel}
+		bmp, err = qrcode.NewQRCodeWriter().Encode(text, gozxing.BarcodeFormat_QR_CODE, sizeX, sizeY, hints)
+	case ":DataMatrix":
+		bmp, err = datamatrix.NewDataMatrixWriter().Encode(text, gozxing.BarcodeFormat_DATA_MATRIX, sizeX, sizeY, nil)
+	default:
+		err = errors.New(fmt.Sprintf("Unsupported barcode format for encode: %s", barcodeFormat))
+	}
 	if err != nil {
 		return err
 	}
@@ -119,6 +221,94 @@ func qrEncode(text string, path string, size int) error {
 	return png.Encode(f, bmp)
 }
 
+func processDecode(message *babashka.Message) {
+	var text string
+	args, err := decodeArgs(message.Args)
+	if err == nil && len(args) < 1 {
+		err = errors.New("decode expects 1 argument: a file path or image bytes")
+	}
+
+	// defaults ...
+	barcodeFormat := ":QR"
+	if err == nil && len(args) >= 2 {
+		optMap := getOptionsMap(args[1])
+		for k, _ := range optMap {
+			switch k {
+			case ":format":
+				barcodeFormat = fmt.Sprintf("%v", optMap[":format"])
+			default:
+				err = errors.New(fmt.Sprintf("unsupported decode option: %s", k))
+				break
+			}
+		}
+	}
+	if err == nil {
+		text, err = decode(barcodeFormat, args[0])
+	}
+
+	if err == nil {
+		respond(message, text)
+	} else {
+		babashka.WriteErrorResponse(message, err)
+	}
+}
+
+func processEncode(message *babashka.Message) {
+	args, err := decodeArgs(message.Args)
+	var text, path string
+	var ok bool
+
+	if err == nil && len(args) < 2 {
+		err = errors.New("encode expects at least 2 arguments: text and output path")
+	}
+	if err == nil {
+		text, ok = args[0].(string)
+		if !ok {
+			err = errors.New("encode: text must be a string")
+		}
+	}
+	if err == nil {
+		path, ok = args[1].(string)
+		if !ok {
+			err = errors.New("encode: output path must be a string")
+		}
+	}
+	// defaults ...
+	barcodeFormat := ":QR"
+	sizeX, sizeY := 256, 256
+	ecLevel := ""
+	if err == nil && len(args) >= 3 {
+		optMap := getOptionsMap(args[2])
+		for k, _ := range optMap {
+			switch k {
+			case ":format":
+				barcodeFormat = fmt.Sprintf("%v", optMap[":format"])
+			case ":size":
+				sizeX, sizeY, err = getSize(optMap)
+			case ":ec-level":
+				ecLevel, err = getECLevel(optMap)
+			default:
+				err = errors.New(fmt.Sprintf("unsupported encode option: %s", k))
+			}
+			if err == nil && barcodeFormat != ":QR" && ecLevel != "" {
+				err = errors.New("ec-level only supported for QR barcode encoding")
+			}
+		}
+	}
+	if ecLevel == "" {
+		ecLevel = "L"
+	}
+
+	if err == nil {
+		err = encode(barcodeFormat, text, path, sizeX, sizeY, ecLevel)
+	}
+	if err == nil {
+		respond(message, path)
+	} else {
+		babashka.WriteErrorResponse(message, err)
+	}
+}
+
 func processMessage(message *babashka.Message) {
 	switch message.Op {
 	case "describe":
@@ -127,7 +317,7 @@ func processMessage(message *babashka.Message) {
 				Format: "transit+json",
 				Namespaces: []babashka.Namespace{
 					{
-						Name: "pod.babashka.gozxing",
+						Name: podName,
 						Vars: []babashka.Var{
 							{Name: "decode"},
 							{Name: "encode"},
@@ -137,51 +327,10 @@ func processMessage(message *babashka.Message) {
 			})
 	case "invoke":
 		switch message.Var {
-		case "pod.babashka.gozxing/decode":
-			args, err := decodeArgs(message.Args)
-			if err != nil {
-				babashka.WriteErrorResponse(message, err)
-				return
-			}
-			if len(args) < 1 {
-				babashka.WriteErrorResponse(message, errors.New("decode expects 1 argument: a file path or image bytes"))
-				return
-			}
-			text, err := qrDecode(args[0])
-			if err != nil {
-				babashka.WriteErrorResponse(message, err)
-				return
-			}
-			respond(message, text)
-		case "pod.babashka.gozxing/encode":
-			args, err := decodeArgs(message.Args)
-			if err != nil {
-				babashka.WriteErrorResponse(message, err)
-				return
-			}
-			if len(args) < 2 {
-				babashka.WriteErrorResponse(message, errors.New("encode expects at least 2 arguments: text and output path"))
-				return
-			}
-			text, ok := args[0].(string)
-			if !ok {
-				babashka.WriteErrorResponse(message, errors.New("encode: text must be a string"))
-				return
-			}
-			path, ok := args[1].(string)
-			if !ok {
-				babashka.WriteErrorResponse(message, errors.New("encode: output path must be a string"))
-				return
-			}
-			size := 256
-			if len(args) >= 3 {
-				size = optSize(args[2])
-			}
-			if err := qrEncode(text, path, size); err != nil {
-				babashka.WriteErrorResponse(message, err)
-				return
-			}
-			respond(message, path)
+		case podName + "/decode":
+			processDecode(message)
+		case podName + "/encode":
+			processEncode(message)
 		default:
 			babashka.WriteErrorResponse(message, fmt.Errorf("Unknown var %s", message.Var))
 		}
